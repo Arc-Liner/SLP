@@ -4,8 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torch.utils.data import random_split
 import torch.optim.lr_scheduler as lr_scheduler
+
+import itertools
 
 import netCDF4 as nc
 import matplotlib.pyplot as plt
@@ -50,6 +51,8 @@ class SpectralConv3d_fast(nn.Module):
         self.scale = (1 / (in_channels * out_channels))
         self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, 2).to(device))
         self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, 2).to(device))
+        self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, 2).to(device))
+        self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, 2).to(device))
 
     def forward(self, x):
         batchsize = x.shape[0]
@@ -63,12 +66,14 @@ class SpectralConv3d_fast(nn.Module):
         # print(f"x_ft_real shape: {x_ft_real.shape}")  # It should have an extra dimension for real/imaginary parts
 
         # Allocate memory for the output Fourier coefficients
-        out_ft = torch.zeros(batchsize, self.in_channels, x.size(-2), x.size(-1)//2 + 1, 2, device=device)
+        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, 2, device=device)
 
         # Multiply relevant Fourier modes using real and imaginary parts
         out_ft[:, :, :self.modes1, :self.modes2] = compl_mul3d(x_ft_real[:, :, :self.modes1, :self.modes2], self.weights1.to(device))
         out_ft[:, :, -self.modes1:, :self.modes2] = compl_mul3d(x_ft_real[:, :, -self.modes1:, :self.modes2], self.weights2.to(device))
-
+        out_ft[:, :, :self.modes1, -self.modes2:] = compl_mul3d(x_ft_real[:, :, :self.modes1, :self.modes2], self.weights3.to(device))
+        out_ft[:, :, -self.modes1:, -self.modes2:] = compl_mul3d(x_ft_real[:, :, -self.modes1:, :self.modes2], self.weights4.to(device))
+        
         # Convert the result back to complex using view_as_complex for irfft2
         out_ft_complex = torch.view_as_complex(out_ft).to(device)
 
@@ -78,60 +83,64 @@ class SpectralConv3d_fast(nn.Module):
         return x
 
 class SimpleBlock3d(nn.Module):
-    def __init__(self, modes1, modes2, width):
+    def __init__(self, modes1, modes2, in_ch, out_ch, width):
         super(SimpleBlock3d, self).__init__()
 
         self.modes1 = modes1
         self.modes2 = modes2
         self.width = width
+        self.in_ch = in_ch
+        self.out_ch = out_ch
+        self.fc0 = nn.Linear(16, self.width).to(device)  #acts only on last dimension
 
-        self.fc0 = nn.Linear(16, self.width)
+        self.conv0 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
+        self.conv1 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
+        self.conv2 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
+        self.conv3 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
+        
+        self.w0 = nn.Conv2d(self.width, self.width, 1).to(device)  #in_channels, out_channels, kernel
+        self.w1 = nn.Conv2d(self.width, self.width, 1).to(device)
+        self.w2 = nn.Conv2d(self.width, self.width, 1).to(device)
+        self.w3 = nn.Conv2d(self.width, self.width, 1).to(device)
+        
+        self.bn0 = torch.nn.BatchNorm2d(self.width).to(device)
+        self.bn1 = torch.nn.BatchNorm2d(self.width).to(device)
+        self.bn2 = torch.nn.BatchNorm2d(self.width).to(device)
+        self.bn3 = torch.nn.BatchNorm2d(self.width).to(device)
 
-        self.conv0 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2)
-        self.conv1 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2)
-        self.conv2 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2)
-        self.conv3 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2)
-        self.w0 = nn.Conv1d(self.width, self.width, 1)
-        self.w1 = nn.Conv1d(self.width, self.width, 1)
-        self.w2 = nn.Conv1d(self.width, self.width, 1)
-        self.w3 = nn.Conv1d(self.width, self.width, 1)
-        self.bn0 = torch.nn.BatchNorm3d(self.width)
-        self.bn1 = torch.nn.BatchNorm3d(self.width)
-        self.bn2 = torch.nn.BatchNorm3d(self.width)
-        self.bn3 = torch.nn.BatchNorm3d(self.width)
 
-
-        self.fc1 = nn.Linear(self.width, 128)
-        self.fc2 = nn.Linear(128, 1)
+        self.fc1 = nn.Linear(self.width, 128).to(device)
+        self.fc2 = nn.Linear(128, out_ch).to(device)
 
     def forward(self, x):
         batchsize = x.shape[0]
-        size_x, size_y, size_z = x.shape[1], x.shape[2], x.shape[3]
+        size_x, size_y = x.shape[1], x.shape[2]
 
+        x = x.permute(0, 2, 3, 1)
         x = self.fc0(x)
-        #x = x.permute(0, 4, 1, 2, 3)
+
+        x = x.permute(0, 3, 1, 2)
 
         x1 = self.conv0(x)
-        x2 = self.w0(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w0(x)
         x = self.bn0(x1 + x2)
         x = F.relu(x)
         x1 = self.conv1(x)
-        x2 = self.w1(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w1(x)
         x = self.bn1(x1 + x2)
         x = F.relu(x)
         x1 = self.conv2(x)
-        x2 = self.w2(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w2(x)
         x = self.bn2(x1 + x2)
         x = F.relu(x)
         x1 = self.conv3(x)
-        x2 = self.w3(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w3(x)
         x = self.bn3(x1 + x2)
-
-
-        #x = x.permute(0, 2, 3, 4, 1)
+        
+        x = x.permute(0, 2, 3, 1)
         x = self.fc1(x)
-        x = F.relu(x)
         x = self.fc2(x)
+        x = x.permute(0, 3, 1, 2)
         return x
 
 class Net3d(nn.Module):
@@ -167,16 +176,15 @@ class TemperatureDataset(Dataset):
     def __init__(self, data, time_step=1):
         self.data = data  # Data is a 4D tensor [time, plevel, lat, lon]
         self.time_step = time_step
-        #data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
+        data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
         
-        """
         # Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
-        self.mean = torch.nanmean(data_tensor, dim=0, keepdim=True)
-        self.std = torch.nanstd(data_tensor, dim=0, keepdim=True)
+        self.mean = torch.nanmean(data_tensor, dim = (0,1), keepdim=True)
+        self.std = torch.std(data_tensor, dim = (0,1), keepdim=True)
         
         # Normalize the data
         self.data = ((data_tensor - self.mean) / self.std).to(device)
-        """
+
 
     def __len__(self):
         return self.data.shape[0] - self.time_step
@@ -184,7 +192,7 @@ class TemperatureDataset(Dataset):
     def __getitem__(self, idx):
         # Return input data and the corresponding target (next time step)
         x = self.data[idx]  # current time step
-        y = self.data[idx + self.time_step]  # next time step (target)
+        y = self.data[idx + self.time_step, :10, ...]  # next time step (target)
         return torch.tensor(x, dtype=torch.float32,device=device), torch.tensor(y, dtype=torch.float32,device=device)
 
 # creating dataset
@@ -197,22 +205,27 @@ train_dataset = TemperatureDataset(temperature_data[:train_size])
 test_dataset = TemperatureDataset(temperature_data[train_size:]) 
 
 # Initialize dataloader
-train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False)
-test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle = True)
+test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle = True)
 
 ################################################################
 # training and evaluation
 ################################################################
-modes = 4
-width = 16
+modes = 6
+width = 20
 
 learn_rate = 0.001
-epochs = 100
+epochs = 80
 
+"""
+# Model without bypass layer 
 model = SpectralConv3d_fast(in_channels=16, out_channels=16, modes1=4, modes2=4).to(device)
+"""
+
+model = SimpleBlock3d(modes1= modes, modes2 = modes, in_ch= 16, out_ch=10 ,width = width)
 optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate, weight_decay=1e-4)
 criterion = nn.MSELoss()
-scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.3, end_factor=learn_rate, total_iters=30)
+scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.5, end_factor=learn_rate, total_iters=30)
 
 #myloss = LpLoss(size_average=False)
 
@@ -228,8 +241,8 @@ def plot_loss(train_losses):
 
 def plot_actual_vs_predicted(actual, predicted):
     plt.figure(figsize=(8,6))
-    plt.plot(actual, label='Actual')
-    plt.plot(predicted, label='Predicted', linestyle='--')
+    plt.plot(actual.flatten()[:100], label='Actual')
+    plt.plot(predicted.flatten()[:100], label='Predicted', linestyle='--')
     plt.title('Actual vs Predicted Output')
     plt.xlabel('Samples')
     plt.ylabel('Temperature')
@@ -264,6 +277,9 @@ def train_model(model, dataloader, epochs, optimizer, loss_fn):
 #Training
 train_model(model, train_dataloader, epochs, optimizer, criterion)
 
+#Save the model
+# filepath = "C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/Machine Learning/ML projects/SLP/sem7"
+# torch.save(model.state_dict(), filepath)
 
 def evaluate_model(model, dataloader):
     model.eval()
@@ -280,8 +296,8 @@ def evaluate_model(model, dataloader):
             predictions.append(outputs.tolist())
     
     # Convert lists to numpy arrays
-    actuals = sum(actuals, [])
-    predictions = sum(predictions, [])
+    actuals = np.array(sum(actuals, []))
+    predictions = np.array(sum(predictions, []))
 
     # Plot actual vs predicted values
     plot_actual_vs_predicted(actuals, predictions)
