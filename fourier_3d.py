@@ -287,25 +287,27 @@ def evaluate_model(model, dataloader):
     predictions = []
     
     with torch.no_grad():
+        avg_loss = 0
         for batch_x, batch_y in dataloader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             outputs = model(batch_x)
-            
+            loss = criterion(outputs, batch_y)
+            avg_loss += loss.item()
             # Store predictions and actuals for plotting
             actuals.append(batch_y.tolist())
             predictions.append(outputs.tolist())
-    
+        avg_loss = avg_loss/len(test_dataloader)
     # Convert lists to numpy arrays
     actuals = np.array(sum(actuals, []))
     predictions = np.array(sum(predictions, []))
 
     # Plot actual vs predicted values
     plot_actual_vs_predicted(actuals, predictions)
+    print("Avg test loss", avg_loss)
 
 # Example usage:
 # After training the model, call evaluate_model to see actual vs predicted values.
 evaluate_model(model, test_dataloader)
-
 
 
 
