@@ -169,6 +169,7 @@ data_filename = "C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/
 dataset = nc.Dataset(data_filename, 'r')
 
 # Extract temperature data, the shape will be [time, plevel, latitude, longitude]
+# For near ocean 
 temperature_data = (dataset.variables['TMP_prl'][:])[... , :10, :10]
 
 # Preparing dataset as pairs of consecutive time steps (t -> t+1)
@@ -179,8 +180,8 @@ class TemperatureDataset(Dataset):
         data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
         
         # Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
-        self.mean = torch.nanmean(data_tensor, dim = (0,1), keepdim=True)
-        self.std = torch.std(data_tensor, dim = (0,1), keepdim=True)
+        self.mean = torch.nanmean(data_tensor, dim = 1, keepdim=True)
+        self.std = torch.std(data_tensor, dim = 1, keepdim=True)
         
         # Normalize the data
         self.data = ((data_tensor - self.mean) / self.std).to(device)
@@ -211,11 +212,11 @@ test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle = True)
 ################################################################
 # training and evaluation
 ################################################################
-modes = 6
+modes = 3
 width = 20
 
 learn_rate = 0.001
-epochs = 80
+epochs = 40
 
 """
 # Model without bypass layer 
@@ -241,14 +242,15 @@ def plot_loss(train_losses):
 
 def plot_actual_vs_predicted(actual, predicted):
     plt.figure(figsize=(8,6))
-    plt.plot(actual.flatten()[:100], label='Actual')
-    plt.plot(predicted.flatten()[:100], label='Predicted', linestyle='--')
-    plt.title('Actual vs Predicted Output')
-    plt.xlabel('Samples')
-    plt.ylabel('Temperature')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    for i in range(5):
+        plt.plot(actual.flatten()[100*i:100*(i+1)], label='Actual')
+        plt.plot(predicted.flatten()[100*i:100*(i+1)], label='Predicted', linestyle='--')
+        plt.title(f"Actual vs Predicted Output for {i}th P level")
+        plt.xlabel('Samples')
+        plt.ylabel('Temperature')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
 def train_model(model, dataloader, epochs, optimizer, loss_fn):
     train_losses = []
@@ -278,8 +280,8 @@ def train_model(model, dataloader, epochs, optimizer, loss_fn):
 train_model(model, train_dataloader, epochs, optimizer, criterion)
 
 #Save the model
-# filepath = "C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/Machine Learning/ML projects/SLP/sem7"
-# torch.save(model.state_dict(), filepath)
+filepath = "FNO_3D.pth"
+torch.save(model, filepath)
 
 def evaluate_model(model, dataloader):
     model.eval()
@@ -305,7 +307,21 @@ def evaluate_model(model, dataloader):
     plot_actual_vs_predicted(actuals, predictions)
     print("Avg test loss", avg_loss)
 
-# Example usage:
+def anomaly_correlation_coefficient(predicted, actual):
+    # Calculate anomalies by subtracting the mean
+    predicted_anomaly = predicted - torch.mean(predicted)
+    actual_anomaly = actual - torch.mean(actual)
+    
+    # Calculate the numerator as the dot product of anomalies
+    numerator = torch.sum(predicted_anomaly * actual_anomaly)
+    
+    # Calculate the denominator as the product of the norms of the anomaly vectors
+    denominator = torch.sqrt(torch.sum(predicted_anomaly ** 2) * torch.sum(actual_anomaly ** 2))
+    
+    # Calculate ACC
+    acc = numerator / denominator
+    return acc
+
 # After training the model, call evaluate_model to see actual vs predicted values.
 evaluate_model(model, test_dataloader)
 
