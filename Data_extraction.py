@@ -1,121 +1,114 @@
+import netCDF4 as nc
 import numpy as np
-import pandas as pd
-import netCDF4 as NC
-import os
-import glob
-from matplotlib import pyplot as plt
-from scipy.optimize import curve_fit
-#from numpy.fft import fft, ifft
-from scipy.signal import welch
-from scipy.fftpack import fft, ifft
-from scipy.fftpack import fftfreq
+import torch
+from mpl_toolkits import mplot3d
+import matplotlib.pyplot as plt
+from scipy.signal import hilbert
+import matplotlib.animation as manimation
 
-path = os.getcwd()
-path=os.path.join(path,"data")
-temporary = os.listdir(path)
-data_files = glob.glob(path+os.sep+'hyd_temp_*.nc')
-print(data_files)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Open the .nc file
+dataset = nc.Dataset('C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/Machine Learning/ML projects/SLP/data/3D_temp_data/ind_1991_temp_3D_250hPa.nc', 'r')
 
-A=[]
-U=[]
+# Extract the temperature data (TMP_prl), latitude, longitude, and pressure levels
+temperature_data = (dataset.variables['TMP_prl'][:])
+temperature_data = temperature_data[... , 75:85, 50:60]
+data_tensor = torch.tensor(np.ma.filled(temperature_data, np.nan))
 
-time = np.empty([0])
-Temperature_values_loc = np.empty([0])
-a_smallest = 321768
-u_smallest = 321768
-
-for i in range(len(data_files)):
-    Data_filename = NC.Dataset(data_files[i],'r')
-    time = np.append(time, Data_filename['time'])
-    # print(Data_filename['plevel'][0])
-    if i%2==0:
-      #Temperature_values_loc_a = np.append(Temperature_values_loc_a, Data_filename['TMP_prl'][:,0,1,1])
-      #time_a = np.append(time_a, Data_filename['time'])
-      A.append(Data_filename['TMP_prl'][:,0,1,1])
-
-      a_smallest = min(a_smallest,len(A[-1]))
+boxed_temp = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
+for i in range(10):
+    if i==0 or i==9:
+        continue
 
     else:
-      # Temperature_values_loc_u = np.append(Temperature_values_loc_u, Data_filename['TMP_prl'][:,0,1,1])
-      # time_u = np.append(time_u, Data_filename['time'])
-      U.append(Data_filename['TMP_prl'][:,0,1,1])
+        boxed_temp[... , i, 1:9] = 0
 
-      u_smallest = min(u_smallest, len(U[-1])) 
+"""
+data_tensor = torch.tensor(boxed_temp,device=device)
+train_mean = torch.nanmean(data_tensor[:100], dim = 1, keepdim=True)
+train_std = torch.std(data_tensor[:100], dim = 1, keepdim=True)
+train_norm = (data_tensor[:100] - train_mean)/train_std
+print(train_norm)
+"""
 
-#temp_data = list(zip(time,Temperature_values_loc))
-#temp_df=pd.DataFrame(temp_data ,columns=["time","Temperature"])
+"""
+def hilbert_2d(matrix):
+    # Apply the Hilbert transform along each axis
+    hilbert_on_x = hilbert(matrix, axis=0)  # Hilbert transform along axis 0 (rows)
+    hilbert_2d_result = hilbert(np.real(hilbert_on_x), axis=1)  # Hilbert transform along axis 1 (columns)
+    return hilbert_2d_result
 
-for i in range(8):
-      A[i]=A[i][:a_smallest]
-      U[i]=U[i][:u_smallest]
+def plot_hilbert_2d(original, hilbert_transformed):
+    # Create a 3D figure with three subplots
+    fig = plt.figure(figsize=(18, 6))
 
-# for month:-
-a_month=[]
-u_month=[]
+    x = np.arange(original.shape[2])
+    y = np.arange(original.shape[3])
+    X, Y = np.meshgrid(x, y)
 
-A=np.array(A)
-U=np.array(U)
+    # Plot the original signal (matrix)
+    ax1 = fig.add_subplot(131, projection='3d')
+    ax1.plot_surface(X, Y, original, cmap='viridis')
+    ax1.set_title('Original Signal')
+    ax1.set_xlabel('Columns')
+    ax1.set_ylabel('Rows')
+    ax1.set_zlabel('Amplitude')
 
-temp1=A[:][:2880]
-temp2=U[:][:2880]
+    # Plot the real part of the Hilbert transform
+    ax2 = fig.add_subplot(132, projection='3d')
+    ax2.plot_surface(X, Y, np.real(hilbert_transformed), cmap='plasma')
+    ax2.set_title('Hilbert Transform (Real Part)')
+    ax2.set_xlabel('Columns')
+    ax2.set_ylabel('Rows')
+    ax2.set_zlabel('Amplitude')
 
-a_num=0
-u_num=0
+    # Plot the imaginary part of the Hilbert transform
+    ax3 = fig.add_subplot(133, projection='3d')
+    ax3.plot_surface(X, Y, np.imag(hilbert_transformed), cmap='inferno')
+    ax3.set_title('Hilbert Transform (Imaginary Part)')
+    ax3.set_xlabel('Columns')
+    ax3.set_ylabel('Rows')
+    ax3.set_zlabel('Amplitude')
 
-for i in range(16):
-  if i%2==0:
-    for j in range(12):
-      if j%2==0:
-        a_month.append(temp1[a_num][240*j:240*(j+1)])
-            
-      else:
-        u_month.append(temp1[a_num][240*j:240*(j+1)])
-      
-    a_num=a_num + 1
+    # Display the plots
+    plt.tight_layout()
+    plt.show()
 
-  else:
-    for j in range(12):
-      if j%2==0:
-        a_month.append(temp2[u_num][240*j:240*(j+1)])
-    
-      else:
-        u_month.append(temp2[u_num][240*j:240*(j+1)])
+hilbert_transformed = hilbert_2d(temperature_data[0, 0, ...])
+print(np.real(hilbert_transformed.size()))
+plot_hilbert_2d(temperature_data[0, 0, ...], hilbert_transformed)
+"""
 
-    u_num=u_num+1
+# Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
+temp_mean = torch.nanmean(data_tensor, dim = (0,1), keepdim=True)
+#print(temperature_data)
+#print(temp_mean)
+# Shape: [time, plevel, latitude, longitude]
+latitude = dataset.variables['latitude'][:]
+longitude = dataset.variables['longitude'][:]
+# plevel = dataset.variables['plevel'][:]
 
-a_month=np.array(a_month)
-u_month=np.array(u_month)
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
 
-# for day:
-a_day=[]
-u_day=[]
+X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
+ax.plot_surface(X, Y, temperature_data[0,10,...], cmap='viridis')
+plt.show()
+#print("The temperature data shape:", temperature_data.shape)
 
-a_num=0
-u_num=0
+#metadata for animation
+FFMpegWriter = manimation.writers['ffmpeg']
+metadata = dict(title='Temp variation', artist='Matplotlib',
+                comment='shows the temp variation over a year near surface level')
+writer = FFMpegWriter(fps=15, metadata=metadata)
 
-# We will loop through each year and through each month, assuming each month has 30 days
-for i in range(192): # Since we are looping through the yearly data having 192 samples 
-  if i%2==0:
-    for j in range(30):
-      if j%2==0:
-        a_day.append(a_month[a_num][8*j:8*(j+1)])
-            
-      else:
-        u_day.append(u_month[a_num][8*j:8*(j+1)])
-      
-    a_num=a_num + 1
-
-  else:
-    for j in range(30):
-      if j%2==0:
-        a_day.append(a_month[u_num][8*j:8*(j+1)])
-    
-      else:
-        u_day.append(u_month[u_num][8*j:8*(j+1)])
-
-    u_num=u_num+1
-
-a_day=np.array(a_day)
-u_day=np.array(u_day)
-
-print(time.shape)
+# Initialize the movie
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
+# Update the frames for the movie
+with writer.saving(fig, "writer_test.mp4", 100):
+    for i in range(100):
+        ax.plot_surface(X, Y, temperature_data[i, 16,...], cmap='viridis')
+        plt.show()
+        writer.grab_frame()

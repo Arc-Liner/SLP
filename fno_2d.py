@@ -51,7 +51,7 @@ class SpectralConv2d(nn.Module):
         # Convert the complex tensor to real-valued representation for compl_mul2d
         x_ft_real = torch.view_as_real(x_ft)
 
-        print(f"x_ft_real shape: {x_ft_real.shape}")  # It should have an extra dimension for real/imaginary parts
+        # print(f"x_ft_real shape: {x_ft_real.shape}")  # It should have an extra dimension for real/imaginary parts
 
         # Allocate memory for the output Fourier coefficients
         out_ft = torch.zeros(batchsize, self.in_channels, x.size(-2), x.size(-1)//2 + 1, 2, device=x.device)

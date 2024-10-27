@@ -103,11 +103,12 @@ class SimpleBlock3d(nn.Module):
         self.w2 = nn.Conv2d(self.width, self.width, 1).to(device)
         self.w3 = nn.Conv2d(self.width, self.width, 1).to(device)
         
+        self.bn = torch.nn.BatchNorm2d(16).to(device)
         self.bn0 = torch.nn.BatchNorm2d(self.width).to(device)
         self.bn1 = torch.nn.BatchNorm2d(self.width).to(device)
         self.bn2 = torch.nn.BatchNorm2d(self.width).to(device)
         self.bn3 = torch.nn.BatchNorm2d(self.width).to(device)
-
+        self.bn4 = torch.nn.BatchNorm2d(128).to(device)
 
         self.fc1 = nn.Linear(self.width, 128).to(device)
         self.fc2 = nn.Linear(128, out_ch).to(device)
@@ -116,30 +117,40 @@ class SimpleBlock3d(nn.Module):
         batchsize = x.shape[0]
         size_x, size_y = x.shape[1], x.shape[2]
 
-        x = x.permute(0, 2, 3, 1)
+        #x = self.bn(x)
+        x = x.permute(0, 2, 3, 1) #since linear layer requires channels in the last dimension
         x = self.fc0(x)
 
         x = x.permute(0, 3, 1, 2)
 
         x1 = self.conv0(x)
         x2 = self.w0(x)
+        x = x1 + x2
         x = self.bn0(x1 + x2)
-        x = F.relu(x)
+        x = F.tanh(x)
         x1 = self.conv1(x)
         x2 = self.w1(x)
-        x = self.bn1(x1 + x2)
-        x = F.relu(x)
+        x = x1 + x2
+        #x = self.bn1(x1 + x2)
+        x = F.tanh(x)
         x1 = self.conv2(x)
         x2 = self.w2(x)
-        x = self.bn2(x1 + x2)
-        x = F.relu(x)
+        x = x1 + x2
+        #x = self.bn2(x1 + x2)
+        x = F.tanh(x)
         x1 = self.conv3(x)
         x2 = self.w3(x)
-        x = self.bn3(x1 + x2)
+        x = x1 + x2
+        #x = self.bn3(x1 + x2)
         
         x = x.permute(0, 2, 3, 1)
         x = self.fc1(x)
+        x = x.permute(0, 3, 1, 2)
+        x = self.bn4(x)
+        x = x.permute(0, 2, 3, 1)
+        x = F.tanh(x)
         x = self.fc2(x)
+        x = F.relu(x)
         x = x.permute(0, 3, 1, 2)
         return x
 
@@ -167,24 +178,35 @@ class Net3d(nn.Module):
 ################################################################
 data_filename = "C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/Machine Learning/ML projects/SLP/data/3D_temp_data/ind_1991_temp_3D_250hPa.nc"
 dataset = nc.Dataset(data_filename, 'r')
-
+latitude = dataset.variables['latitude'][:]
+longitude = dataset.variables['longitude'][:]
 # Extract temperature data, the shape will be [time, plevel, latitude, longitude]
 # For near ocean 
-temperature_data = (dataset.variables['TMP_prl'][:])[... , :10, :10]
+temperature_data = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
+
+# Creating boxed dataset for temperature
+boxed_temp = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
+for i in range(10):
+    if i==0 or i==9:
+        continue
+
+    else:
+        boxed_temp[... , i, 1:9] = 0
 
 # Preparing dataset as pairs of consecutive time steps (t -> t+1)
 class TemperatureDataset(Dataset):
     def __init__(self, data, time_step=1):
-        self.data = data  # Data is a 4D tensor [time, plevel, lat, lon]
+        self.data = data # Data is a 4D tensor [time, plevel, lat, lon]
         self.time_step = time_step
-        data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
+
+        # data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
         
-        # Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
-        self.mean = torch.nanmean(data_tensor, dim = 1, keepdim=True)
-        self.std = torch.std(data_tensor, dim = 1, keepdim=True)
+        # # Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
+        # self.mean = torch.nanmean(data_tensor, dim = (0,1), keepdim=True)
+        # self.std = torch.std(data_tensor, dim = (0,1), keepdim=True)
         
-        # Normalize the data
-        self.data = ((data_tensor - self.mean) / self.std).to(device)
+        # # Normalize the data
+        # self.data = ((data_tensor - self.mean) / self.std).to(device)
 
 
     def __len__(self):
@@ -193,17 +215,31 @@ class TemperatureDataset(Dataset):
     def __getitem__(self, idx):
         # Return input data and the corresponding target (next time step)
         x = self.data[idx]  # current time step
-        y = self.data[idx + self.time_step, :10, ...]  # next time step (target)
+        y = self.data[idx + self.time_step, 6:, ...]  # next time step (target)
         return torch.tensor(x, dtype=torch.float32,device=device), torch.tensor(y, dtype=torch.float32,device=device)
 
 # creating dataset
 temp_dataset = TemperatureDataset(temperature_data)
+data_tensor = torch.tensor(temperature_data,device=device)
 
 #Splitting the dataset
 train_size = int(0.85 * len(temp_dataset))
 test_size = int(len(temp_dataset) - train_size)
-train_dataset = TemperatureDataset(temperature_data[:train_size])
-test_dataset = TemperatureDataset(temperature_data[train_size:]) 
+
+# Normalized data
+train_mean = torch.nanmean(data_tensor[:train_size], dim = 1, keepdim=True)
+train_std = torch.std(data_tensor[:train_size], dim = 1, keepdim=True)
+train_norm = (data_tensor[:train_size] - train_mean)/train_std
+train_dataset = TemperatureDataset(train_norm)
+# non normalized data
+#train_dataset = TemperatureDataset(data_tensor[:train_size])
+
+test_mean = torch.nanmean(data_tensor[train_size:], dim = 1, keepdim=True)
+test_std = torch.std(data_tensor[train_size:], dim = 1, keepdim=True)
+test_norm = (data_tensor[train_size:] - test_mean)/test_std
+test_dataset = TemperatureDataset(test_norm) 
+
+#test_dataset = TemperatureDataset(data_tensor[train_size:])
 
 # Initialize dataloader
 train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle = True)
@@ -215,8 +251,8 @@ test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle = True)
 modes = 3
 width = 20
 
-learn_rate = 0.001
-epochs = 40
+learn_rate = 0.01
+epochs = 60
 
 """
 # Model without bypass layer 
@@ -226,7 +262,7 @@ model = SpectralConv3d_fast(in_channels=16, out_channels=16, modes1=4, modes2=4)
 model = SimpleBlock3d(modes1= modes, modes2 = modes, in_ch= 16, out_ch=10 ,width = width)
 optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate, weight_decay=1e-4)
 criterion = nn.MSELoss()
-scheduler = lr_scheduler.LinearLR(optimizer, start_factor=0.5, end_factor=learn_rate, total_iters=30)
+scheduler = lr_scheduler.LinearLR(optimizer, start_factor = 0.8, end_factor=learn_rate, total_iters=30)
 
 #myloss = LpLoss(size_average=False)
 
@@ -242,17 +278,22 @@ def plot_loss(train_losses):
 
 def plot_actual_vs_predicted(actual, predicted):
     plt.figure(figsize=(8,6))
-    for i in range(5):
-        plt.plot(actual.flatten()[100*i:100*(i+1)], label='Actual')
-        plt.plot(predicted.flatten()[100*i:100*(i+1)], label='Predicted', linestyle='--')
-        plt.title(f"Actual vs Predicted Output for {i}th P level")
-        plt.xlabel('Samples')
-        plt.ylabel('Temperature')
-        plt.legend()
-        plt.grid(True)
+    for i in range(10):
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
+        ax.plot_surface(X, Y, actual[i,i, ...] - predicted[i, i, ...], cmap='viridis')
+        plt.title(f"Actual vs Predicted Output for P{10-i} level")
         plt.show()
+        # plt.plot(actual.flatten()[100*i:100*(i+1)], label='Actual')
+        # plt.plot(predicted.flatten()[100*i:100*(i+1)], label='Predicted', linestyle='--')
+        # plt.xlabel('Samples')
+        # plt.ylabel('Temperature')
+        # plt.legend()
+        # plt.grid(True)
+        # plt.show()
 
-def train_model(model, dataloader, epochs, optimizer, loss_fn):
+def train_model(model, dataloader, epochs, optimizer, loss_fn, lambda_reg):
     train_losses = []
     for epoch in range(epochs):
         epoch_loss = 0
@@ -261,7 +302,12 @@ def train_model(model, dataloader, epochs, optimizer, loss_fn):
             optimizer.zero_grad()
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             outputs = model(batch_x)
+            # batch_y_mean = torch.nanmean(batch_y, dim = 1, keepdim=True)
+            # batch_y_std = torch.std(batch_y, dim = 1, keepdim=True)
+            # batch_y_norm = (batch_y - batch_y_mean)/batch_y_std
             loss = loss_fn(outputs, batch_y)
+            # l2_norm = sum(p.abs().sum() for p in model.parameters())
+            # loss += lambda_reg * l2_norm
             epoch_loss += loss.item()
             
             # Backward pass
@@ -277,7 +323,8 @@ def train_model(model, dataloader, epochs, optimizer, loss_fn):
     plot_loss(train_losses)
 
 #Training
-train_model(model, train_dataloader, epochs, optimizer, criterion)
+lambda_reg = 0.01
+train_model(model, train_dataloader, epochs, optimizer, criterion, lambda_reg)
 
 #Save the model
 filepath = "FNO_3D.pth"
@@ -293,6 +340,9 @@ def evaluate_model(model, dataloader):
         for batch_x, batch_y in dataloader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             outputs = model(batch_x)
+            # batch_y_mean = torch.nanmean(batch_y, dim = 1, keepdim=True)
+            # batch_y_std = torch.std(batch_y, dim = 1, keepdim=True)
+            # batch_y_norm = (batch_y - batch_y_mean)/batch_y_std
             loss = criterion(outputs, batch_y)
             avg_loss += loss.item()
             # Store predictions and actuals for plotting
@@ -324,6 +374,7 @@ def anomaly_correlation_coefficient(predicted, actual):
 
 # After training the model, call evaluate_model to see actual vs predicted values.
 evaluate_model(model, test_dataloader)
+
 
 
 
