@@ -5,7 +5,7 @@ import h5py
 import sklearn.metrics
 import torch.nn as nn
 from scipy.ndimage import gaussian_filter
-
+from PyEMD import EMD
 
 #################################################
 #
@@ -234,3 +234,23 @@ class DenseNet(torch.nn.Module):
             x = l(x)
 
         return x
+
+def imf_gen(data, device, modes = 100):
+    # Initialize EMD
+    emd = EMD()
+    time_dim, channels, x_dim, y_dim = data.shape
+    # Placeholder for storing Intrinsic Mode Functions (IMFs)
+    imfs_data = np.zeros((modes, time_dim, channels, x_dim, y_dim))  # 8 is arbitrary, can adjust based on # of modes found
+    imfs_data = torch.from_numpy(imfs_data).to(device)
+
+    for i in range(channels):
+        for j in range(x_dim):
+            for k in range(y_dim):
+                signal = data[:, i, j, k]
+                imfs = emd(signal)
+                num_imfs = imfs.shape[0]
+                imfs = torch.from_numpy(imfs).to(device)
+                imfs_data[:num_imfs:, :, i, j, k] = imfs
+    
+    return imfs_data[:num_imfs,...]
+    

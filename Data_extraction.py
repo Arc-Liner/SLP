@@ -4,17 +4,16 @@ import torch
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
 from scipy.signal import hilbert
-import matplotlib.animation as manimation
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Open the .nc file
 dataset = nc.Dataset('C:/Users/ASUS/OneDrive - Indian Institute of Technology Bombay/Machine Learning/ML projects/SLP/data/3D_temp_data/ind_1991_temp_3D_250hPa.nc', 'r')
 
 # Extract the temperature data (TMP_prl), latitude, longitude, and pressure levels
-temperature_data = (dataset.variables['TMP_prl'][:])
-temperature_data = temperature_data[... , 75:85, 50:60]
+temperature_data = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
 data_tensor = torch.tensor(np.ma.filled(temperature_data, np.nan))
 
+"""
 boxed_temp = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
 for i in range(10):
     if i==0 or i==9:
@@ -23,7 +22,7 @@ for i in range(10):
     else:
         boxed_temp[... , i, 1:9] = 0
 
-"""
+
 data_tensor = torch.tensor(boxed_temp,device=device)
 train_mean = torch.nanmean(data_tensor[:100], dim = 1, keepdim=True)
 train_std = torch.std(data_tensor[:100], dim = 1, keepdim=True)
@@ -96,19 +95,13 @@ ax.plot_surface(X, Y, temperature_data[0,10,...], cmap='viridis')
 plt.show()
 #print("The temperature data shape:", temperature_data.shape)
 
-#metadata for animation
-FFMpegWriter = manimation.writers['ffmpeg']
-metadata = dict(title='Temp variation', artist='Matplotlib',
-                comment='shows the temp variation over a year near surface level')
-writer = FFMpegWriter(fps=15, metadata=metadata)
-
 # Initialize the movie
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
 X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
-# Update the frames for the movie
-with writer.saving(fig, "writer_test.mp4", 100):
-    for i in range(100):
-        ax.plot_surface(X, Y, temperature_data[i, 16,...], cmap='viridis')
-        plt.show()
-        writer.grab_frame()
+
+for i in range(100):
+    ax.plot_surface(X, Y, temperature_data[i, 15,...], cmap='viridis')
+    plt.pause(1)
+    plt.show()
+    

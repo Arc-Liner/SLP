@@ -6,8 +6,6 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import torch.optim.lr_scheduler as lr_scheduler
 
-import itertools
-
 import netCDF4 as nc
 import matplotlib.pyplot as plt
 from utilities3 import *
@@ -40,6 +38,27 @@ def compl_mul3d(a, b):
         op(a[..., 1], b[..., 0]) + op(a[..., 0], b[..., 1])
     ], dim=-1)
 
+def hilbert_transform_3d(x):
+    """Applies the Hilbert transform to the 3D Fourier coefficients."""
+    # Get the size of the Fourier coefficients
+    x_ft = torch.fft.rfft2(x, norm='ortho')
+
+    batchsize, in_channels, dim_x, dim_y = x_ft.shape
+
+    # Create a Hilbert mask to zero out the negative frequencies
+    hilbert_mask = torch.zeros_like(x_ft)
+    
+    # In 3D, we need to handle multiple dimensions, so we zero out appropriate negative frequencies
+    hilbert_mask[:, :, 0:dim_x//2+1, :] = 1  # Keep positive frequencies in the x-direction
+    hilbert_mask[:, :, :, 0:dim_y//2+1] = 1  # Keep positive frequencies in the y-direction
+    
+    # Apply the mask to the Fourier coefficients
+    x_hilbert_ft = x_ft * hilbert_mask
+    
+    # Return to physical space using irfft2
+    x_processed = torch.fft.irfft2(x_hilbert_ft, s=(x.size(-2), x.size(-1)), norm='ortho').to(device)
+    return x_processed
+
 class SpectralConv3d_fast(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
         super(SpectralConv3d_fast, self).__init__()
@@ -60,7 +79,7 @@ class SpectralConv3d_fast(nn.Module):
         # Compute Fourier coefficients using rfft2 (for real-valued input)
         x_ft = torch.fft.rfft2(x, norm='ortho')
 
-        # Convert the complex tensor to real-valued representation for compl_mul2d
+        # Convert the complex tensor to real-valued representation for compl_mul2d, basically separates real and imaginary part
         x_ft_real = torch.view_as_real(x_ft).to(device)
 
         # print(f"x_ft_real shape: {x_ft_real.shape}")  # It should have an extra dimension for real/imaginary parts
@@ -120,11 +139,12 @@ class SimpleBlock3d(nn.Module):
         #x = self.bn(x)
         x = x.permute(0, 2, 3, 1) #since linear layer requires channels in the last dimension
         x = self.fc0(x)
+        x = F.tanh(x)
 
         x = x.permute(0, 3, 1, 2)
 
         x1 = self.conv0(x)
-        x2 = self.w0(x)
+        x2 = self.w0(hilbert_transform_3d(x))
         x = x1 + x2
         x = self.bn0(x1 + x2)
         x = F.tanh(x)
@@ -145,10 +165,10 @@ class SimpleBlock3d(nn.Module):
         
         x = x.permute(0, 2, 3, 1)
         x = self.fc1(x)
-        x = x.permute(0, 3, 1, 2)
-        x = self.bn4(x)
-        x = x.permute(0, 2, 3, 1)
-        x = F.tanh(x)
+        # x = x.permute(0, 3, 1, 2)
+        # x = self.bn4(x)
+        # x = x.permute(0, 2, 3, 1)
+        x = F.relu(x)
         x = self.fc2(x)
         x = F.relu(x)
         x = x.permute(0, 3, 1, 2)
@@ -185,13 +205,13 @@ longitude = dataset.variables['longitude'][:]
 temperature_data = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
 
 # Creating boxed dataset for temperature
-boxed_temp = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
-for i in range(10):
-    if i==0 or i==9:
-        continue
+# boxed_temp = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
+# for i in range(10):
+#     if i==0 or i==9:
+#         continue
 
-    else:
-        boxed_temp[... , i, 1:9] = 0
+#     else:
+#         boxed_temp[... , i, 1:9] = 0
 
 # Preparing dataset as pairs of consecutive time steps (t -> t+1)
 class TemperatureDataset(Dataset):
@@ -222,7 +242,10 @@ class TemperatureDataset(Dataset):
 temp_dataset = TemperatureDataset(temperature_data)
 data_tensor = torch.tensor(temperature_data,device=device)
 
-#Splitting the dataset
+imfs_data = imf_gen(temperature_data, device)
+print("imfs_data shape:", imfs_data.shape)
+
+# Splitting the dataset
 train_size = int(0.85 * len(temp_dataset))
 test_size = int(len(temp_dataset) - train_size)
 
@@ -239,6 +262,9 @@ test_std = torch.std(data_tensor[train_size:], dim = 1, keepdim=True)
 test_norm = (data_tensor[train_size:] - test_mean)/test_std
 test_dataset = TemperatureDataset(test_norm) 
 
+# mean and std for the predicted data :-
+predicted_mean = torch.nanmean(data_tensor[train_size + 1: , 6: , ...], dim = 1, keepdim = True)
+predicted_std = torch.std(data_tensor[train_size + 1: , 6: , ...], dim = 1, keepdim = True)
 #test_dataset = TemperatureDataset(data_tensor[train_size:])
 
 # Initialize dataloader
@@ -252,7 +278,7 @@ modes = 3
 width = 20
 
 learn_rate = 0.01
-epochs = 60
+epochs = 10
 
 """
 # Model without bypass layer 
@@ -278,13 +304,52 @@ def plot_loss(train_losses):
 
 def plot_actual_vs_predicted(actual, predicted):
     plt.figure(figsize=(8,6))
+    stds = predicted_std.to("cpu")
+
+    means = predicted_mean.to("cpu")
+
+    actual = torch.from_numpy(actual).to("cpu")
+    actual = (actual*stds) + means
+
+    predicted = torch.from_numpy(predicted).to("cpu")
+    predicted = (predicted*stds) + means
+
+    p_levels = np.arange(10, 0, -1)
+    p_levels = torch.from_numpy(p_levels)
+
     for i in range(10):
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
-        ax.plot_surface(X, Y, actual[i,i, ...] - predicted[i, i, ...], cmap='viridis')
-        plt.title(f"Actual vs Predicted Output for P{10-i} level")
+        # fig = plt.figure()
+        # ax = fig.add_subplot(121, projection='3d')
+        # X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
+        # ax.plot_surface(X, Y, actual[0,i, ...], cmap='viridis')
+        # ax = fig.add_subplot(122, projection='3d')
+        # ax.plot_surface(X, Y, predicted[0, i, ...], cmap='viridis')
+        # plt.title(f"Actual vs Predicted Output for P{10-i} level")
+        
+        plt.subplot(1, 2, 1)
+        plt.plot(actual[i, :, 0, 0], p_levels)
+        plt.xlabel("Temperature")
+        plt.ylabel("Pressure Levels")
+        plt.title(f"Actual variation at {i}th timestep")
+
+        plt.subplot(1, 2, 2)
+        plt.plot(predicted[i, :, 0, 0], p_levels, color = "orange")
+        plt.xlabel("Temperature")
+        plt.ylabel("Pressure Levels")
+        plt.title(f"Predicted variation at {i}th timestep")
+
+        err_predict = torch.norm(actual[i, :, 0, 0] - predicted[i, :, 0 , 0])
+        plt.suptitle(f"Error between actual and predicted : {err_predict}")
         plt.show()
+
+    # x = np.linspace(0,16,1)
+    # for i in range(10):
+    #     fig = plt.figure()
+    #     fig.plot(actual[0,:, 0, 0], cmap='viridis')
+    #     plt.title(f"Actual vs Predicted Output for P{10-i} level")
+    #     plt.show()
+    
+    print("ACC:",anomaly_correlation_coefficient(predicted, actual))
         # plt.plot(actual.flatten()[100*i:100*(i+1)], label='Actual')
         # plt.plot(predicted.flatten()[100*i:100*(i+1)], label='Predicted', linestyle='--')
         # plt.xlabel('Samples')
@@ -359,14 +424,14 @@ def evaluate_model(model, dataloader):
 
 def anomaly_correlation_coefficient(predicted, actual):
     # Calculate anomalies by subtracting the mean
-    predicted_anomaly = predicted - torch.mean(predicted)
-    actual_anomaly = actual - torch.mean(actual)
+    predicted_anomaly = predicted - np.mean(predicted)
+    actual_anomaly = actual - np.mean(actual)
     
     # Calculate the numerator as the dot product of anomalies
-    numerator = torch.sum(predicted_anomaly * actual_anomaly)
+    numerator = np.sum(predicted_anomaly * actual_anomaly)
     
     # Calculate the denominator as the product of the norms of the anomaly vectors
-    denominator = torch.sqrt(torch.sum(predicted_anomaly ** 2) * torch.sum(actual_anomaly ** 2))
+    denominator = np.sqrt(np.sum(predicted_anomaly ** 2) * np.sum(actual_anomaly ** 2))
     
     # Calculate ACC
     acc = numerator / denominator
