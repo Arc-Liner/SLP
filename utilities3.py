@@ -235,6 +235,20 @@ class DenseNet(torch.nn.Module):
 
         return x
 
+def nanstd(o, dim, keepdim=False):
+
+    result = torch.sqrt(
+                torch.nanmean(
+                    torch.pow( torch.abs(o-torch.nanmean(o,dim=dim).unsqueeze(dim)),2),
+                    dim=dim
+                )
+            )
+    
+    if keepdim:
+        result = result.unsqueeze(dim)
+    
+    return result
+    
 def imf_gen(data, device, modes = 100):
     # Initialize EMD
     emd = EMD()

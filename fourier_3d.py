@@ -8,7 +8,10 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 import netCDF4 as nc
 import matplotlib.pyplot as plt
-from utilities3 import *
+from utilities3 import nanstd
+from utilities3 import imf_gen
+
+from graph_comp import compute_mutual_information
 
 import operator
 from functools import reduce
@@ -110,7 +113,7 @@ class SimpleBlock3d(nn.Module):
         self.width = width
         self.in_ch = in_ch
         self.out_ch = out_ch
-        self.fc0 = nn.Linear(16, self.width).to(device)  #acts only on last dimension
+        self.fc0 = nn.Linear(self.in_ch, self.width).to(device)  #acts only on last dimension
 
         self.conv0 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
         self.conv1 = SpectralConv3d_fast(self.width, self.width, self.modes1, self.modes2).to(device)
@@ -122,7 +125,7 @@ class SimpleBlock3d(nn.Module):
         self.w2 = nn.Conv2d(self.width, self.width, 1).to(device)
         self.w3 = nn.Conv2d(self.width, self.width, 1).to(device)
         
-        self.bn = torch.nn.BatchNorm2d(16).to(device)
+        self.bn = torch.nn.BatchNorm2d(self.in_ch).to(device)
         self.bn0 = torch.nn.BatchNorm2d(self.width).to(device)
         self.bn1 = torch.nn.BatchNorm2d(self.width).to(device)
         self.bn2 = torch.nn.BatchNorm2d(self.width).to(device)
@@ -144,9 +147,9 @@ class SimpleBlock3d(nn.Module):
         x = x.permute(0, 3, 1, 2)
 
         x1 = self.conv0(x)
-        x2 = self.w0(hilbert_transform_3d(x))
-        x = x1 + x2
-        x = self.bn0(x1 + x2)
+        # x2 = self.w0(hilbert_transform_3d(x))
+        x = x1
+        x = self.bn0(x)
         x = F.tanh(x)
         x1 = self.conv1(x)
         x2 = self.w1(x)
@@ -215,10 +218,10 @@ temperature_data = (dataset.variables['TMP_prl'][:])[... , 75:85, 50:60]
 
 # Preparing dataset as pairs of consecutive time steps (t -> t+1)
 class TemperatureDataset(Dataset):
-    def __init__(self, data, time_step=1):
+    def __init__(self, data, eps = 1e-5, time_step=1):
         self.data = data # Data is a 4D tensor [time, plevel, lat, lon]
         self.time_step = time_step
-
+        self.eps = eps
         # data_tensor = torch.tensor(np.ma.filled(self.data, np.nan),device=device)
         
         # # Compute mean and std over the plevel, lat, lon dimensions (ignoring time)
@@ -234,38 +237,54 @@ class TemperatureDataset(Dataset):
 
     def __getitem__(self, idx):
         # Return input data and the corresponding target (next time step)
-        x = self.data[idx]  # current time step
-        y = self.data[idx + self.time_step, 6:, ...]  # next time step (target)
-        return torch.tensor(x, dtype=torch.float32,device=device), torch.tensor(y, dtype=torch.float32,device=device)
+        x = self.data[idx, ...]  # current time step
+        x = torch.tensor(x, dtype=torch.float32,device=device)
+        # x_mean = torch.nanmean(x, dim = 0, keepdim = True)
+        # x_std = nanstd(x, dim = 0, keepdim = True)
+        # x = (x - x_mean)/(x_std + self.eps)
+
+        y = self.data[idx + self.time_step, ...]  # next time step (target)
+        y = torch.tensor( y, dtype=torch.float32,device=device)
+        # y_mean = torch.nanmean(y, dim= 0, keepdim = True)
+        # y_std = nanstd(y, dim = 0, keepdim = True)
+        # y = (y - y_mean)/(y_std + self.eps)        
+
+        return x, y
 
 # creating dataset
 temp_dataset = TemperatureDataset(temperature_data)
 data_tensor = torch.tensor(temperature_data,device=device)
 
-imfs_data = imf_gen(temperature_data, device)
-print("imfs_data shape:", imfs_data.shape)
+# For IMF dataset
+# imfs_data = imf_gen(temperature_data[:500, ...], device)
+# print("imfs_data shape:", imfs_data.shape)
+# temp_dataset = TemperatureDataset(imfs_data[ 0, ...])
+# data_tensor = torch.tensor(imfs_data[ 0, ...],device=device)
 
 # Splitting the dataset
 train_size = int(0.85 * len(temp_dataset))
 test_size = int(len(temp_dataset) - train_size)
 
 # Normalized data
-train_mean = torch.nanmean(data_tensor[:train_size], dim = 1, keepdim=True)
-train_std = torch.std(data_tensor[:train_size], dim = 1, keepdim=True)
+train_mean = torch.nanmean(data_tensor[:train_size, ...], dim = 1, keepdim=True)
+train_std = torch.std(data_tensor[:train_size, ...], dim = 1, keepdim=True)
 train_norm = (data_tensor[:train_size] - train_mean)/train_std
 train_dataset = TemperatureDataset(train_norm)
-# non normalized data
-#train_dataset = TemperatureDataset(data_tensor[:train_size])
 
-test_mean = torch.nanmean(data_tensor[train_size:], dim = 1, keepdim=True)
-test_std = torch.std(data_tensor[train_size:], dim = 1, keepdim=True)
+# non normalized train data
+# train_dataset = TemperatureDataset(data_tensor[:train_size], eps = 1e-3)
+
+test_mean = torch.nanmean(data_tensor[train_size: , ...], dim = 1, keepdim=True)
+test_std = torch.std(data_tensor[train_size:, ...], dim = 1, keepdim=True)
 test_norm = (data_tensor[train_size:] - test_mean)/test_std
 test_dataset = TemperatureDataset(test_norm) 
 
 # mean and std for the predicted data :-
-predicted_mean = torch.nanmean(data_tensor[train_size + 1: , 6: , ...], dim = 1, keepdim = True)
-predicted_std = torch.std(data_tensor[train_size + 1: , 6: , ...], dim = 1, keepdim = True)
-#test_dataset = TemperatureDataset(data_tensor[train_size:])
+predicted_mean = torch.nanmean(data_tensor[train_size + 1: , ...], dim = 1, keepdim = True)
+predicted_std = torch.std(data_tensor[train_size + 1: , ...], dim = 1, keepdim = True)
+
+# non normalized test data
+# test_dataset = TemperatureDataset(data_tensor[train_size:])
 
 # Initialize dataloader
 train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle = True)
@@ -274,18 +293,18 @@ test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle = True)
 ################################################################
 # training and evaluation
 ################################################################
-modes = 3
+modes = 2
 width = 20
 
 learn_rate = 0.01
-epochs = 10
+epochs = 40
 
 """
 # Model without bypass layer 
 model = SpectralConv3d_fast(in_channels=16, out_channels=16, modes1=4, modes2=4).to(device)
 """
 
-model = SimpleBlock3d(modes1= modes, modes2 = modes, in_ch= 16, out_ch=10 ,width = width)
+model = SimpleBlock3d(modes1= modes, modes2 = modes, in_ch= 16, out_ch=16 ,width = width)
 optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate, weight_decay=1e-4)
 criterion = nn.MSELoss()
 scheduler = lr_scheduler.LinearLR(optimizer, start_factor = 0.8, end_factor=learn_rate, total_iters=30)
@@ -304,59 +323,48 @@ def plot_loss(train_losses):
 
 def plot_actual_vs_predicted(actual, predicted):
     plt.figure(figsize=(8,6))
-    stds = predicted_std.to("cpu")
 
-    means = predicted_mean.to("cpu")
+    print("Mutual Info:",compute_mutual_information(actual[10, ...], predicted[10, ...]))
+    print("ACC:",anomaly_correlation_coefficient(predicted, actual))
+    # stds = predicted_std.to("cpu")
 
-    actual = torch.from_numpy(actual).to("cpu")
-    actual = (actual*stds) + means
+    # means = predicted_mean.to("cpu")
 
-    predicted = torch.from_numpy(predicted).to("cpu")
-    predicted = (predicted*stds) + means
+    # actual = torch.from_numpy(actual).to("cpu")
+    # actual = (actual*stds) + means
 
-    p_levels = np.arange(10, 0, -1)
-    p_levels = torch.from_numpy(p_levels)
+    # predicted = torch.from_numpy(predicted).to("cpu")
+    # predicted = (predicted*stds) + means
+
+    # p_levels = np.arange(10, 2, -1)
+    # levels = len(p_levels)
+    # p_levels = torch.from_numpy(p_levels)
 
     for i in range(10):
-        # fig = plt.figure()
-        # ax = fig.add_subplot(121, projection='3d')
-        # X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
-        # ax.plot_surface(X, Y, actual[0,i, ...], cmap='viridis')
-        # ax = fig.add_subplot(122, projection='3d')
-        # ax.plot_surface(X, Y, predicted[0, i, ...], cmap='viridis')
-        # plt.title(f"Actual vs Predicted Output for P{10-i} level")
+        fig = plt.figure()
+        ax = fig.add_subplot(121, projection='3d')
+        X, Y = np.meshgrid(latitude[75:85], longitude[50:60])
+        ax.plot_surface(X, Y, actual[10,i, ...], cmap='viridis')
+        ax = fig.add_subplot(122, projection='3d')
+        ax.plot_surface(X, Y, predicted[10, i, ...], cmap='viridis')
+        plt.suptitle(f"Actual vs Predicted Output for P{10-i} level")
         
-        plt.subplot(1, 2, 1)
-        plt.plot(actual[i, :, 0, 0], p_levels)
-        plt.xlabel("Temperature")
-        plt.ylabel("Pressure Levels")
-        plt.title(f"Actual variation at {i}th timestep")
+        # plt.subplot(1, 2, 1)
+        # plt.plot(actual[i, :-2, 0, 0], p_levels)
+        # plt.xlabel("Temperature")
+        # plt.ylabel("Pressure Levels")
+        # plt.title(f"Actual variation at {i}th timestep")
 
-        plt.subplot(1, 2, 2)
-        plt.plot(predicted[i, :, 0, 0], p_levels, color = "orange")
-        plt.xlabel("Temperature")
-        plt.ylabel("Pressure Levels")
-        plt.title(f"Predicted variation at {i}th timestep")
+        # plt.subplot(1, 2, 2)
+        # plt.plot(predicted[i, :-2, 0, 0], p_levels, color = "orange")
+        # plt.xlabel("Temperature")
+        # plt.ylabel("Pressure Levels")
+        # plt.title(f"Predicted variation at {i}th timestep")
 
-        err_predict = torch.norm(actual[i, :, 0, 0] - predicted[i, :, 0 , 0])
-        plt.suptitle(f"Error between actual and predicted : {err_predict}")
+        # err_predict = torch.norm(actual[i, :-2, 0, 0] - predicted[i, :-2, 0 , 0])/levels
+        # plt.suptitle(f"Error between actual and predicted : {err_predict}")
         plt.show()
 
-    # x = np.linspace(0,16,1)
-    # for i in range(10):
-    #     fig = plt.figure()
-    #     fig.plot(actual[0,:, 0, 0], cmap='viridis')
-    #     plt.title(f"Actual vs Predicted Output for P{10-i} level")
-    #     plt.show()
-    
-    print("ACC:",anomaly_correlation_coefficient(predicted, actual))
-        # plt.plot(actual.flatten()[100*i:100*(i+1)], label='Actual')
-        # plt.plot(predicted.flatten()[100*i:100*(i+1)], label='Predicted', linestyle='--')
-        # plt.xlabel('Samples')
-        # plt.ylabel('Temperature')
-        # plt.legend()
-        # plt.grid(True)
-        # plt.show()
 
 def train_model(model, dataloader, epochs, optimizer, loss_fn, lambda_reg):
     train_losses = []
@@ -437,10 +445,26 @@ def anomaly_correlation_coefficient(predicted, actual):
     acc = numerator / denominator
     return acc
 
-# After training the model, call evaluate_model to see actual vs predicted values.
-evaluate_model(model, test_dataloader)
+initial_data = data_tensor[train_size + 1, ...]
+input = initial_data.reshape(1, 16, 10, 10)
+acc = np.empty(100)
 
+for i in range(100):
+    output = model(input)
+    input = output
+    temp = np.array((output.cpu()).detach().numpy())
+    acc[i] = anomaly_correlation_coefficient(temp, temperature_data[train_size + (i+1)])
 
+iterations = np.arange(0, 100, 1)
+plt.plot(iterations, acc)
+plt.title("Autoregressive testing")
+plt.xlabel("iterations")
+plt.ylabel("ACC")
+plt.show()
+# Testing
+#evaluate_model(model, test_dataloader)
 
+# MI(2modes): 1.9402356669001055
+# ACC(2 modes): 0.9813193344439611
 
 
